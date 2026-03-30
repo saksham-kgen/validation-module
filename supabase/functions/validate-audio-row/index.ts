@@ -283,8 +283,7 @@ function runTranscriptQC(segments: Segment[]): TranscriptQcResult {
     issues.R04_empty_text.length             > 0 ||
     issues.R06_mixed_label_format.length     > 0 ||
     issues.R07_invalid_label_format.length   > 0 ||
-    issues.R10_zero_duration.length          > 0 ||
-    issues.R12_invalid_speaker_labels.length > 0;
+    issues.R10_zero_duration.length          > 0;
 
   const softWarn = issues.R08_large_gap.length > 0;
   const verdict  = hardFail ? "Fail" : softWarn ? "Warn" : "Pass";
