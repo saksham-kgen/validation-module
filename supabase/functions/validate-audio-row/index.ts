@@ -107,7 +107,7 @@ interface SingleSpeakerResult {
 
 function isValidTimestamp(ts: unknown): boolean {
   if (!ts) return false;
-  return /^\d{2}:\d{2}:\d{2}$/.test(String(ts).trim());
+  return /^\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(String(ts).trim());
 }
 
 function toSeconds(ts: unknown): number {
