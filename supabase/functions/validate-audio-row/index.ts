@@ -378,23 +378,45 @@ function isHtmlResponse(text: string): boolean {
 }
 
 async function fetchGoogleDriveFile(rawUrl: string, options: RequestInit = {}, ms = 12000): Promise<{ resp: Response; buf: ArrayBuffer }> {
-  const primaryUrl = buildDirectDownloadUrl(rawUrl);
-  const resp = await fetchWithTimeout(primaryUrl, { ...options, redirect: "follow" }, ms);
-  const buf = await resp.arrayBuffer();
-  const bytes = new Uint8Array(buf);
-  const preview = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 64));
+  const id = extractGoogleDriveId(rawUrl);
 
-  if ((resp.ok || resp.status === 206) && isHtmlResponse(preview)) {
-    const id = extractGoogleDriveId(rawUrl);
-    if (id) {
-      const fallbackUrl = `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=t`;
-      const fallbackResp = await fetchWithTimeout(fallbackUrl, { ...options, redirect: "follow" }, ms);
-      const fallbackBuf = await fallbackResp.arrayBuffer();
-      return { resp: fallbackResp, buf: fallbackBuf };
+  const cleanOptions = { ...options };
+  if ((cleanOptions.headers as Record<string, string>)?.["Range"]) {
+    delete (cleanOptions.headers as Record<string, string>)["Range"];
+  }
+
+  const urlsToTry: string[] = [];
+  if (id) {
+    urlsToTry.push(
+      `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=t`,
+      `https://drive.google.com/uc?export=download&confirm=t&id=${id}`,
+    );
+  }
+  urlsToTry.push(buildDirectDownloadUrl(rawUrl));
+
+  let lastResp: Response | null = null;
+  let lastBuf: ArrayBuffer = new ArrayBuffer(0);
+
+  for (const url of urlsToTry) {
+    try {
+      const fetchOpts = url.includes("Range") ? options : cleanOptions;
+      const resp = await fetchWithTimeout(url, { ...fetchOpts, redirect: "follow" }, ms);
+      const buf = await resp.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      const preview = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 64));
+
+      if (!isHtmlResponse(preview) && (resp.ok || resp.status === 206) && bytes.byteLength > 100) {
+        return { resp, buf };
+      }
+
+      lastResp = resp;
+      lastBuf = buf;
+    } catch {
+      continue;
     }
   }
 
-  return { resp, buf };
+  return { resp: lastResp ?? new Response(null, { status: 502 }), buf: lastBuf };
 }
 
 async function validateWavFile(rawUrl: string, minDur: number, maxDur: number): Promise<{ ok: boolean; errors: string[] }> {
