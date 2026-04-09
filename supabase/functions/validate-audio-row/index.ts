@@ -541,25 +541,53 @@ function computeWer(reference: string, hypothesis: string): number {
 // ELEVENLABS SCRIBE V2 — transcribe audio for hypothesis
 // =============================================================================
 
+function detectAudioMime(bytes: Uint8Array): { mime: string; ext: string } {
+  if (bytes.length >= 4) {
+    const riff = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+    if (riff === "RIFF") return { mime: "audio/wav", ext: "wav" };
+  }
+  if (bytes.length >= 3) {
+    if (bytes[0] === 0xFF && (bytes[1] & 0xE0) === 0xE0) return { mime: "audio/mpeg", ext: "mp3" };
+    if (bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) return { mime: "audio/mpeg", ext: "mp3" };
+  }
+  if (bytes.length >= 4) {
+    const ogg = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+    if (ogg === "OggS") return { mime: "audio/ogg", ext: "ogg" };
+  }
+  if (bytes.length >= 4 && bytes[4] === 0x66 && bytes[5] === 0x74 && bytes[6] === 0x79 && bytes[7] === 0x70) {
+    return { mime: "audio/mp4", ext: "m4a" };
+  }
+  return { mime: "audio/wav", ext: "wav" };
+}
+
 async function transcribeWithElevenLabs(
   audioUrl: string,
   apiKey: string,
   languageCode?: string
 ): Promise<{ ok: boolean; text?: string; error?: string }> {
-  const directUrl = buildDirectDownloadUrl(audioUrl);
-  if (!directUrl?.trim()) return { ok: false, error: "Empty audio URL for transcription" };
+  if (!audioUrl?.trim()) return { ok: false, error: "Empty audio URL for transcription" };
 
   try {
-    const audioResp = await fetchWithTimeout(directUrl, { redirect: "follow" }, 30000);
-    if (!audioResp.ok) {
+    const { resp: audioResp, buf: audioBuffer } = await fetchGoogleDriveFile(audioUrl, { redirect: "follow" }, 30000);
+    if (!audioResp.ok && audioResp.status !== 206) {
       return { ok: false, error: `Failed to fetch audio for transcription (HTTP ${audioResp.status})` };
     }
 
-    const audioBuffer = await audioResp.arrayBuffer();
-    const audioBytes  = new Uint8Array(audioBuffer);
+    const audioBytes = new Uint8Array(audioBuffer);
+
+    const preview = new TextDecoder("utf-8", { fatal: false }).decode(audioBytes.slice(0, 64));
+    if (isHtmlResponse(preview)) {
+      return { ok: false, error: "Audio URL returned HTML – link may be private or require login" };
+    }
+
+    if (audioBytes.byteLength < 100) {
+      return { ok: false, error: `Audio file too small (${audioBytes.byteLength} bytes) – may not have downloaded correctly` };
+    }
+
+    const { mime, ext } = detectAudioMime(audioBytes);
 
     const form = new FormData();
-    form.append("file", new Blob([audioBytes], { type: "audio/wav" }), "audio.wav");
+    form.append("file", new Blob([audioBytes], { type: mime }), `audio.${ext}`);
     form.append("model_id", "scribe_v2");
     form.append("diarize", "false");
     if (languageCode?.trim()) form.append("language_code", languageCode.trim());
