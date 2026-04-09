@@ -380,10 +380,7 @@ function isHtmlResponse(text: string): boolean {
 async function fetchGoogleDriveFile(rawUrl: string, options: RequestInit = {}, ms = 12000): Promise<{ resp: Response; buf: ArrayBuffer }> {
   const id = extractGoogleDriveId(rawUrl);
 
-  const cleanOptions = { ...options };
-  if ((cleanOptions.headers as Record<string, string>)?.["Range"]) {
-    delete (cleanOptions.headers as Record<string, string>)["Range"];
-  }
+  const cleanOptions: RequestInit = { redirect: "follow" };
 
   const urlsToTry: string[] = [];
   if (id) {
@@ -399,8 +396,7 @@ async function fetchGoogleDriveFile(rawUrl: string, options: RequestInit = {}, m
 
   for (const url of urlsToTry) {
     try {
-      const fetchOpts = url.includes("Range") ? options : cleanOptions;
-      const resp = await fetchWithTimeout(url, { ...fetchOpts, redirect: "follow" }, ms);
+      const resp = await fetchWithTimeout(url, cleanOptions, ms);
       const buf = await resp.arrayBuffer();
       const bytes = new Uint8Array(buf);
       const preview = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 64));
@@ -719,9 +715,9 @@ async function handleAccuracy(body: RowInput): Promise<ValidationResult> {
 
   let segments: Segment[] | null = null;
   try {
-    const resp = await fetchWithTimeout(url, { redirect: "follow" }, 15000);
+    const { resp, buf } = await fetchGoogleDriveFile(url, {}, 15000);
     if (!resp.ok) return skipped();
-    const text = await resp.text();
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(buf));
     if (isHtmlResponse(text)) return skipped();
     let parsed: unknown;
     try { parsed = JSON.parse(text); } catch { return skipped(); }
