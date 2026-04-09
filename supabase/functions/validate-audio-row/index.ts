@@ -349,22 +349,6 @@ function runTranscriptQC(segments: Segment[]): TranscriptQcResult {
 // WAV FILE VALIDATION
 // =============================================================================
 
-function extractGoogleDriveId(url: string): string | null {
-  const patterns = [/\/file\/d\/([a-zA-Z0-9_-]+)/, /[?&]id=([a-zA-Z0-9_-]+)/, /\/d\/([a-zA-Z0-9_-]+)\//];
-  for (const p of patterns) { const m = url.match(p); if (m) return m[1]; }
-  return null;
-}
-
-function buildDirectDownloadUrl(url: string): string {
-  if (!url?.trim()) return url;
-  const t = url.trim();
-  if (t.includes("drive.google.com") || t.includes("docs.google.com")) {
-    const id = extractGoogleDriveId(t);
-    if (id) return `https://drive.google.com/uc?export=download&confirm=t&id=${id}`;
-  }
-  return t;
-}
-
 async function fetchWithTimeout(url: string, options: RequestInit = {}, ms = 12000): Promise<Response> {
   const ctrl = new AbortController();
   const id   = setTimeout(() => ctrl.abort(), ms);
@@ -377,116 +361,16 @@ function isHtmlResponse(text: string): boolean {
   return t.includes("<!doctype") || t.includes("<html");
 }
 
-function extractConfirmToken(html: string): string | null {
-  const patterns = [
-    /[?&]confirm=([0-9A-Za-z_-]+)/,
-    /name="confirm"\s+value="([^"]+)"/,
-    /value="([^"]+)"\s+name="confirm"/,
-    /confirm=([0-9A-Za-z_-]+)/,
-  ];
-  for (const p of patterns) {
-    const m = html.match(p);
-    if (m) return m[1];
-  }
-  return null;
-}
-
-function extractWarningCookies(headers: Headers): string {
-  const cookies: string[] = [];
-  const setCookie = headers.get("set-cookie") ?? "";
-  const warningMatch = setCookie.match(/download_warning[^=]*=([^;,\s]+)/g);
-  if (warningMatch) {
-    for (const c of warningMatch) {
-      const kv = c.match(/download_warning[^=]*=([^;,\s]+)/);
-      if (kv) cookies.push(`download_warning=${kv[1]}`);
-    }
-  }
-  const gdMatch = setCookie.match(/GD_SESSION=([^;,\s]+)/);
-  if (gdMatch) cookies.push(`GD_SESSION=${gdMatch[1]}`);
-  return cookies.join("; ");
-}
-
-const DRIVE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-
-async function fetchGoogleDriveFile(rawUrl: string, _options: RequestInit = {}, ms = 12000): Promise<{ resp: Response; buf: ArrayBuffer }> {
-  const id = extractGoogleDriveId(rawUrl);
-
-  const baseHeaders: Record<string, string> = { "User-Agent": DRIVE_UA };
-  const baseOptions: RequestInit = { redirect: "follow", headers: baseHeaders };
-
-  const urlsToTry: string[] = [];
-  if (id) {
-    urlsToTry.push(
-      `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=t`,
-      `https://drive.google.com/uc?export=download&confirm=t&id=${id}`,
-    );
-  }
-  urlsToTry.push(buildDirectDownloadUrl(rawUrl));
-
-  let lastResp: Response | null = null;
-  let lastBuf: ArrayBuffer = new ArrayBuffer(0);
-
-  for (const url of urlsToTry) {
-    try {
-      const resp = await fetchWithTimeout(url, baseOptions, ms);
-      const buf = await resp.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      const preview = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 1024));
-
-      if (!isHtmlResponse(preview) && (resp.ok || resp.status === 206) && bytes.byteLength > 100) {
-        return { resp, buf };
-      }
-
-      if (isHtmlResponse(preview) && id) {
-        const confirmToken = extractConfirmToken(preview) ?? "t";
-        const cookieStr = extractWarningCookies(resp.headers);
-        const retryHeaders: Record<string, string> = { "User-Agent": DRIVE_UA };
-        if (cookieStr) retryHeaders["Cookie"] = cookieStr;
-
-        const retryUrls = [
-          `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=${confirmToken}`,
-          `https://drive.google.com/uc?export=download&confirm=${confirmToken}&id=${id}`,
-          `https://drive.google.com/uc?id=${id}&export=download&confirm=${confirmToken}&acknowledge_download=true`,
-        ];
-
-        for (const retryUrl of retryUrls) {
-          try {
-            const retryResp = await fetchWithTimeout(retryUrl, { redirect: "follow", headers: retryHeaders }, ms);
-            const retryBuf = await retryResp.arrayBuffer();
-            const retryBytes = new Uint8Array(retryBuf);
-            const retryPreview = new TextDecoder("utf-8", { fatal: false }).decode(retryBytes.slice(0, 64));
-
-            if (!isHtmlResponse(retryPreview) && (retryResp.ok || retryResp.status === 206) && retryBytes.byteLength > 100) {
-              return { resp: retryResp, buf: retryBuf };
-            }
-
-            lastResp = retryResp;
-            lastBuf = retryBuf;
-          } catch {
-            continue;
-          }
-        }
-      }
-
-      lastResp = resp;
-      lastBuf = buf;
-    } catch {
-      continue;
-    }
-  }
-
-  return { resp: lastResp ?? new Response(null, { status: 502 }), buf: lastBuf };
-}
-
 async function validateWavFile(rawUrl: string, minDur: number, maxDur: number): Promise<{ ok: boolean; errors: string[] }> {
   const errors: string[] = [];
   if (!rawUrl?.trim()) return { ok: false, errors: ["Empty URL"] };
   try {
-    const { resp, buf } = await fetchGoogleDriveFile(rawUrl, { method: "GET", headers: { Range: "bytes=0-511" } });
+    const resp = await fetchWithTimeout(rawUrl, { method: "GET", headers: { Range: "bytes=0-511" } });
     if (!resp.ok && resp.status !== 206) {
       errors.push(resp.status === 403 || resp.status === 401 ? `Access denied (HTTP ${resp.status})` : resp.status === 404 ? "File not found (HTTP 404)" : `HTTP ${resp.status}`);
       return { ok: false, errors };
     }
+    const buf = await resp.arrayBuffer();
     const bytes = new Uint8Array(buf);
     if (bytes.byteLength < 4) { errors.push("File too small"); return { ok: false, errors }; }
     const preview = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 12));
@@ -551,13 +435,13 @@ async function fetchAndQcTranscription(rawUrl: string): Promise<{
 }> {
   if (!rawUrl?.trim()) return { ok: false, errors: ["Empty transcription URL"] };
   try {
-    const { resp, buf } = await fetchGoogleDriveFile(rawUrl, {}, 15000);
+    const resp = await fetchWithTimeout(rawUrl, {}, 15000);
     if (!resp.ok) {
       const msg = resp.status === 403 || resp.status === 401 ? `Access denied (HTTP ${resp.status})`
         : resp.status === 404 ? "Transcription file not found (HTTP 404)" : `HTTP ${resp.status}`;
       return { ok: false, errors: [msg] };
     }
-    const text = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(buf));
+    const text = await resp.text();
     if (isHtmlResponse(text)) return { ok: false, errors: ["URL returned HTML instead of JSON"] };
 
     let parsed: unknown;
@@ -649,11 +533,12 @@ async function transcribeWithElevenLabs(
   if (!audioUrl?.trim()) return { ok: false, error: "Empty audio URL for transcription" };
 
   try {
-    const { resp: audioResp, buf: audioBuffer } = await fetchGoogleDriveFile(audioUrl, { redirect: "follow" }, 30000);
+    const audioResp = await fetchWithTimeout(audioUrl, { redirect: "follow" }, 30000);
     if (!audioResp.ok && audioResp.status !== 206) {
       return { ok: false, error: `Failed to fetch audio for transcription (HTTP ${audioResp.status})` };
     }
 
+    const audioBuffer = await audioResp.arrayBuffer();
     const audioBytes = new Uint8Array(audioBuffer);
 
     const preview = new TextDecoder("utf-8", { fatal: false }).decode(audioBytes.slice(0, 64));
@@ -773,14 +658,13 @@ async function handleAccuracy(body: RowInput): Promise<ValidationResult> {
   if (!elevenLabsApiKey) return skipped();
 
   // Fetch and parse transcription JSON to get per-speaker reference texts
-  const url = buildDirectDownloadUrl(transcription);
-  if (!url?.trim()) return skipped();
+  if (!transcription?.trim()) return skipped();
 
   let segments: Segment[] | null = null;
   try {
-    const { resp, buf } = await fetchGoogleDriveFile(url, {}, 15000);
+    const resp = await fetchWithTimeout(transcription, {}, 15000);
     if (!resp.ok) return skipped();
-    const text = new TextDecoder("utf-8", { fatal: false }).decode(new Uint8Array(buf));
+    const text = await resp.text();
     if (isHtmlResponse(text)) return skipped();
     let parsed: unknown;
     try { parsed = JSON.parse(text); } catch { return skipped(); }
