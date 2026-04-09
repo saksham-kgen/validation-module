@@ -378,20 +378,41 @@ function isHtmlResponse(text: string): boolean {
 }
 
 function extractConfirmToken(html: string): string | null {
-  const m = html.match(/confirm=([0-9A-Za-z_\-]+)/);
-  return m ? m[1] : null;
+  const patterns = [
+    /[?&]confirm=([0-9A-Za-z_-]+)/,
+    /name="confirm"\s+value="([^"]+)"/,
+    /value="([^"]+)"\s+name="confirm"/,
+    /confirm=([0-9A-Za-z_-]+)/,
+  ];
+  for (const p of patterns) {
+    const m = html.match(p);
+    if (m) return m[1];
+  }
+  return null;
 }
 
-function extractWarningCookie(setCookieHeader: string | null): string | null {
-  if (!setCookieHeader) return null;
-  const m = setCookieHeader.match(/download_warning[^=]*=([^;]+)/);
-  return m ? `download_warning=${m[1]}` : null;
+function extractWarningCookies(headers: Headers): string {
+  const cookies: string[] = [];
+  const setCookie = headers.get("set-cookie") ?? "";
+  const warningMatch = setCookie.match(/download_warning[^=]*=([^;,\s]+)/g);
+  if (warningMatch) {
+    for (const c of warningMatch) {
+      const kv = c.match(/download_warning[^=]*=([^;,\s]+)/);
+      if (kv) cookies.push(`download_warning=${kv[1]}`);
+    }
+  }
+  const gdMatch = setCookie.match(/GD_SESSION=([^;,\s]+)/);
+  if (gdMatch) cookies.push(`GD_SESSION=${gdMatch[1]}`);
+  return cookies.join("; ");
 }
+
+const DRIVE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 async function fetchGoogleDriveFile(rawUrl: string, _options: RequestInit = {}, ms = 12000): Promise<{ resp: Response; buf: ArrayBuffer }> {
   const id = extractGoogleDriveId(rawUrl);
 
-  const baseOptions: RequestInit = { redirect: "follow" };
+  const baseHeaders: Record<string, string> = { "User-Agent": DRIVE_UA };
+  const baseOptions: RequestInit = { redirect: "follow", headers: baseHeaders };
 
   const urlsToTry: string[] = [];
   if (id) {
@@ -410,7 +431,7 @@ async function fetchGoogleDriveFile(rawUrl: string, _options: RequestInit = {}, 
       const resp = await fetchWithTimeout(url, baseOptions, ms);
       const buf = await resp.arrayBuffer();
       const bytes = new Uint8Array(buf);
-      const preview = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 512));
+      const preview = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 1024));
 
       if (!isHtmlResponse(preview) && (resp.ok || resp.status === 206) && bytes.byteLength > 100) {
         return { resp, buf };
@@ -418,18 +439,19 @@ async function fetchGoogleDriveFile(rawUrl: string, _options: RequestInit = {}, 
 
       if (isHtmlResponse(preview) && id) {
         const confirmToken = extractConfirmToken(preview) ?? "t";
-        const warningCookie = extractWarningCookie(resp.headers.get("set-cookie"));
-        const retryHeaders: Record<string, string> = {};
-        if (warningCookie) retryHeaders["Cookie"] = warningCookie;
+        const cookieStr = extractWarningCookies(resp.headers);
+        const retryHeaders: Record<string, string> = { "User-Agent": DRIVE_UA };
+        if (cookieStr) retryHeaders["Cookie"] = cookieStr;
 
         const retryUrls = [
           `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=${confirmToken}`,
           `https://drive.google.com/uc?export=download&confirm=${confirmToken}&id=${id}`,
+          `https://drive.google.com/uc?id=${id}&export=download&confirm=${confirmToken}&acknowledge_download=true`,
         ];
 
         for (const retryUrl of retryUrls) {
           try {
-            const retryResp = await fetchWithTimeout(retryUrl, { ...baseOptions, headers: retryHeaders }, ms);
+            const retryResp = await fetchWithTimeout(retryUrl, { redirect: "follow", headers: retryHeaders }, ms);
             const retryBuf = await retryResp.arrayBuffer();
             const retryBytes = new Uint8Array(retryBuf);
             const retryPreview = new TextDecoder("utf-8", { fatal: false }).decode(retryBytes.slice(0, 64));
