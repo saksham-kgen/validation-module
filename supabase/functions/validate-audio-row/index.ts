@@ -377,10 +377,21 @@ function isHtmlResponse(text: string): boolean {
   return t.includes("<!doctype") || t.includes("<html");
 }
 
-async function fetchGoogleDriveFile(rawUrl: string, options: RequestInit = {}, ms = 12000): Promise<{ resp: Response; buf: ArrayBuffer }> {
+function extractConfirmToken(html: string): string | null {
+  const m = html.match(/confirm=([0-9A-Za-z_\-]+)/);
+  return m ? m[1] : null;
+}
+
+function extractWarningCookie(setCookieHeader: string | null): string | null {
+  if (!setCookieHeader) return null;
+  const m = setCookieHeader.match(/download_warning[^=]*=([^;]+)/);
+  return m ? `download_warning=${m[1]}` : null;
+}
+
+async function fetchGoogleDriveFile(rawUrl: string, _options: RequestInit = {}, ms = 12000): Promise<{ resp: Response; buf: ArrayBuffer }> {
   const id = extractGoogleDriveId(rawUrl);
 
-  const cleanOptions: RequestInit = { redirect: "follow" };
+  const baseOptions: RequestInit = { redirect: "follow" };
 
   const urlsToTry: string[] = [];
   if (id) {
@@ -396,13 +407,43 @@ async function fetchGoogleDriveFile(rawUrl: string, options: RequestInit = {}, m
 
   for (const url of urlsToTry) {
     try {
-      const resp = await fetchWithTimeout(url, cleanOptions, ms);
+      const resp = await fetchWithTimeout(url, baseOptions, ms);
       const buf = await resp.arrayBuffer();
       const bytes = new Uint8Array(buf);
-      const preview = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 64));
+      const preview = new TextDecoder("utf-8", { fatal: false }).decode(bytes.slice(0, 512));
 
       if (!isHtmlResponse(preview) && (resp.ok || resp.status === 206) && bytes.byteLength > 100) {
         return { resp, buf };
+      }
+
+      if (isHtmlResponse(preview) && id) {
+        const confirmToken = extractConfirmToken(preview) ?? "t";
+        const warningCookie = extractWarningCookie(resp.headers.get("set-cookie"));
+        const retryHeaders: Record<string, string> = {};
+        if (warningCookie) retryHeaders["Cookie"] = warningCookie;
+
+        const retryUrls = [
+          `https://drive.usercontent.google.com/download?id=${id}&export=download&authuser=0&confirm=${confirmToken}`,
+          `https://drive.google.com/uc?export=download&confirm=${confirmToken}&id=${id}`,
+        ];
+
+        for (const retryUrl of retryUrls) {
+          try {
+            const retryResp = await fetchWithTimeout(retryUrl, { ...baseOptions, headers: retryHeaders }, ms);
+            const retryBuf = await retryResp.arrayBuffer();
+            const retryBytes = new Uint8Array(retryBuf);
+            const retryPreview = new TextDecoder("utf-8", { fatal: false }).decode(retryBytes.slice(0, 64));
+
+            if (!isHtmlResponse(retryPreview) && (retryResp.ok || retryResp.status === 206) && retryBytes.byteLength > 100) {
+              return { resp: retryResp, buf: retryBuf };
+            }
+
+            lastResp = retryResp;
+            lastBuf = retryBuf;
+          } catch {
+            continue;
+          }
+        }
       }
 
       lastResp = resp;
